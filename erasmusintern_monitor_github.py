@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-ErasmusIntern Traineeship Monitor - GitHub Actions Version
-Monitors the ErasmusIntern.org website for new traineeship postings and sends Telegram alerts.
+Improved ErasmusIntern Traineeship Parser - GitHub Actions Version
+More focused parsing methods for capturing specific fields from ErasmusIntern.org
+Designed to run as a GitHub Action on a schedule.
 
 This version:
 - Reads Telegram credentials from environment variables
 - Runs once and exits (no continuous loop)
 - Commits CSV updates back to the repository
-- Stores data separately from EurOdyssey monitor
 """
 
 import requests
@@ -70,29 +70,8 @@ class ErasmusInternMonitor:
             logger.error(f"Error fetching page: {e}")
             return None
     
-    def extract_date_from_text(self, text: str, patterns: List[str]) -> str:
-        """Extract date from text using multiple possible patterns."""
-        if not text:
-            return ''
-            
-        # Common date patterns
-        date_patterns = [
-            r'\d{1,2}/\d{1,2}/\d{4}',      # DD/MM/YYYY or D/M/YYYY
-            r'\d{1,2}-\d{1,2}-\d{4}',      # DD-MM-YYYY
-            r'\d{4}-\d{1,2}-\d{1,2}',      # YYYY-MM-DD
-            r'\d{1,2}\.\d{1,2}\.\d{4}',    # DD.MM.YYYY
-            r'[A-Za-z]+ \d{1,2}, \d{4}',   # Month DD, YYYY
-            r'\d{1,2} [A-Za-z]+ \d{4}',    # DD Month YYYY
-        ]
-        
-        for pattern in date_patterns:
-            match = re.search(pattern, text)
-            if match:
-                return match.group(0)
-        return ''
-    
     def parse_traineeships(self, html_content: str) -> List[Dict]:
-        """Parse traineeship listings from HTML content."""
+        """Parse traineeship listings from HTML content with focused selectors."""
         if not html_content:
             return []
             
@@ -103,316 +82,280 @@ class ErasmusInternMonitor:
         title = soup.find('title')
         logger.info(f"Parsing ErasmusIntern page: {title.get_text(strip=True) if title else 'Unknown'}")
         
-        # Try multiple possible selectors for traineeship listings
-        traineeship_containers = self.find_traineeship_containers(soup)
+        # Try multiple strategies to find traineeship containers
+        traineeship_containers = self.find_traineeship_containers_robust(soup)
         
         if not traineeship_containers:
             logger.warning("Could not find traineeship containers - page structure may have changed")
+            # Basic structure info for debugging
+            view_content = soup.find('div', class_='view-content')
+            if view_content:
+                logger.info("Found view-content div")
+                divs_in_content = view_content.find_all('div', recursive=False)
+                logger.info(f"Found {len(divs_in_content)} direct child divs in view-content")
+            else:
+                logger.warning("Could not find view-content div")
             return []
         
-        logger.info(f"Found {len(traineeship_containers)} potential traineeship containers")
+        logger.info(f"Found {len(traineeship_containers)} traineeship containers")
         
         for i, container in enumerate(traineeship_containers):
             try:
                 traineeship = self.parse_single_traineeship(container, i)
                 if traineeship:
                     traineeships.append(traineeship)
-                    logger.debug(f"Added traineeship: {traineeship['title']} in {traineeship['location']}")
+                    logger.debug(f"Parsed: {traineeship['title']} at {traineeship['company']}")
                 
             except Exception as e:
-                logger.warning(f"Error parsing traineeship container {i}: {e}")
+                logger.warning(f"Error parsing traineeship {i}: {e}")
                 continue
         
-        logger.info(f"Successfully parsed {len(traineeships)} traineeships from ErasmusIntern")
+        logger.info(f"Successfully parsed {len(traineeships)} ErasmusIntern traineeships")
         return traineeships
     
-    def find_traineeship_containers(self, soup):
-        """Find traineeship containers using multiple selector strategies."""
-        # Strategy 1: Look for common traineeship/job listing selectors
-        selectors = [
-            '.traineeship-item', '.job-item', '.internship-item',
-            '.listing-item', '.opportunity-item', '.vacancy-item',
-            '[class*="traineeship"]', '[class*="internship"]', '[class*="job"]',
-            '.card', '.post', '.entry', '.item',
-            'article', '.result', '.listing'
-        ]
+    def find_traineeship_containers_robust(self, soup):
+        """Find traineeship containers using multiple strategies."""
+        # Strategy 1: Exact class match (handle extra spaces)
+        containers = soup.find_all('div', class_=lambda x: x and 'node' in x and 'node-traineeship' in x and 'view-mode-media_list' in x)
+        if containers:
+            logger.info(f"Found containers using exact class match: {len(containers)}")
+            return containers
         
-        for selector in selectors:
-            containers = soup.select(selector)
-            if containers and len(containers) > 1:  # Need multiple items
-                logger.info(f"Found containers using selector: {selector}")
-                return containers
+        # Strategy 2: Look for divs with 'about' attribute containing 'traineeship'
+        containers = soup.find_all('div', attrs={'about': lambda x: x and 'traineeship' in x})
+        if containers:
+            logger.info(f"Found containers using 'about' attribute: {len(containers)}")
+            return containers
         
-        # Strategy 2: Look for repeated structure patterns
-        # Find divs that appear multiple times with similar structure
-        all_divs = soup.find_all('div')
-        class_counts = {}
+        # Strategy 3: Look within view-content for nested structures
+        view_content = soup.find('div', class_='view-content')
+        if view_content:
+            # Look for divs that contain traineeship links
+            potential_containers = []
+            for div in view_content.find_all('div', recursive=True):
+                # Check if this div contains a link to a traineeship
+                traineeship_link = div.find('a', href=lambda x: x and 'traineeship' in x)
+                if traineeship_link and 'node' in str(div.get('class', [])):
+                    potential_containers.append(div)
+            
+            if potential_containers:
+                logger.info(f"Found containers using traineeship links: {len(potential_containers)}")
+                return potential_containers
         
-        for div in all_divs:
-            classes = div.get('class', [])
-            if classes:
-                class_key = ' '.join(sorted(classes))
-                class_counts[class_key] = class_counts.get(class_key, 0) + 1
-        
-        # Find classes that appear multiple times (likely listings)
-        for class_name, count in class_counts.items():
-            if count >= 3:  # At least 3 similar items
-                containers = soup.find_all('div', class_=class_name.split())
-                if self.validate_containers(containers):
-                    logger.info(f"Found containers using repeated pattern: .{class_name} ({count} items)")
-                    return containers
-        
-        # Strategy 3: Fallback - look for any structure with links
-        containers = soup.find_all(['div', 'article', 'li'], href=True)
-        if not containers:
-            containers = soup.find_all(['div', 'article', 'li'])
-            containers = [c for c in containers if c.find('a', href=True)]
+        # Strategy 4: Look for any div with a title that links to a traineeship
+        containers = []
+        for h3 in soup.find_all('h3'):
+            link = h3.find('a', href=lambda x: x and 'traineeship' in x)
+            if link:
+                # Find the parent container
+                parent = h3.find_parent('div', class_=lambda x: x and 'node' in x)
+                if parent and parent not in containers:
+                    containers.append(parent)
         
         if containers:
-            logger.info(f"Using fallback strategy, found {len(containers)} containers")
-            return containers[:20]  # Limit to first 20 to avoid noise
+            logger.info(f"Found containers using h3 title links: {len(containers)}")
+            return containers
         
+        logger.error("All container detection strategies failed")
         return []
     
-    def validate_containers(self, containers):
-        """Validate that containers look like traineeship listings."""
-        if len(containers) < 2:
-            return False
-        
-        # Check if containers have typical job listing elements
-        has_links = sum(1 for c in containers[:5] if c.find('a', href=True)) >= 2
-        has_text = sum(1 for c in containers[:5] if len(c.get_text(strip=True)) > 20) >= 2
-        
-        return has_links and has_text
-    
     def parse_single_traineeship(self, container, index: int) -> Dict:
-        """Parse a single traineeship container."""
-        # Generate unique ID
-        container_text = container.get_text(strip=True)
-        traineeship_id = hashlib.md5(f"{container_text[:100]}{index}".encode()).hexdigest()[:12]
+        """Parse a single traineeship with focused field extraction."""
         
         # Extract title
         title = self.extract_title(container)
-        
-        # Extract company/organization
-        company = self.extract_company(container)
-        
-        # Extract location
-        location = self.extract_location(container)
-        
-        # Extract dates
-        deadline = self.extract_deadline(container)
-        start_date = self.extract_start_date(container)
-        duration = self.extract_duration(container)
-        
-        # Extract description snippet
-        description = self.extract_description(container)
-        
-        # Extract link
-        link = self.extract_link(container)
-        
-        # Validate that we have minimum required data
         if not title or len(title.strip()) < 3:
             return None
+        
+        # Generate unique ID based on title and content
+        container_text = container.get_text(strip=True)
+        traineeship_id = hashlib.md5(f"{title}{container_text[:100]}".encode()).hexdigest()[:12]
+        
+        # Extract other fields
+        field = self.extract_field(container)
+        company = self.extract_company(container)
+        location = self.extract_location(container)
+        duration = self.extract_duration(container)
+        post_date = self.extract_post_date(container)
+        deadline = self.extract_deadline(container)
+        link = self.extract_link(container)
+        description = self.extract_description(container)
         
         traineeship = {
             'id': traineeship_id,
             'title': title,
+            'field': field,
             'company': company,
             'location': location,
-            'deadline': deadline,
-            'start_date': start_date,
             'duration': duration,
-            'description': description[:200] if description else '',  # Limit description length
+            'post_date': post_date,
+            'deadline': deadline,
+            'description': description[:200] if description else '',
             'link': link,
             'date_identified': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
         
         return traineeship
     
-    def extract_title(self, container):
-        """Extract traineeship title."""
-        # Try multiple selectors for title
-        title_selectors = [
-            'h1', 'h2', 'h3', 'h4', 'h5',
-            '.title', '.job-title', '.traineeship-title', '.position-title',
-            '[class*="title"]', '[class*="heading"]',
-            'a[href*="/traineeship"]', 'a[href*="/internship"]', 'a[href*="/job"]'
-        ]
-        
-        for selector in title_selectors:
-            element = container.select_one(selector)
-            if element:
-                title = element.get_text(strip=True)
-                if title and len(title) > 3:
-                    return title
-        
-        # Fallback: first link text or strong text
-        link = container.find('a', href=True)
-        if link:
-            title = link.get_text(strip=True)
-            if title and len(title) > 3:
-                return title
-        
-        strong = container.find(['strong', 'b'])
-        if strong:
-            title = strong.get_text(strip=True)
-            if title and len(title) > 3:
-                return title
-        
-        return f"Traineeship Opportunity #{container.get('id', 'unknown')}"
-    
-    def extract_company(self, container):
-        """Extract company/organization name."""
-        company_selectors = [
-            '.company', '.organization', '.employer',
-            '[class*="company"]', '[class*="org"]', '[class*="employer"]'
-        ]
-        
-        for selector in company_selectors:
-            element = container.select_one(selector)
-            if element:
-                company = element.get_text(strip=True)
-                if company:
-                    return company
-        
-        # Look for common company indicators in text
-        text = container.get_text()
-        company_patterns = [
-            r'Company:\s*([^\n]+)',
-            r'Organization:\s*([^\n]+)',
-            r'Employer:\s*([^\n]+)',
-            r'at\s+([A-Z][^\n,]+(?:Ltd|Inc|Corp|GmbH|B\.V\.|S\.A\.))',
-        ]
-        
-        for pattern in company_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                return match.group(1).strip()
-        
-        return 'Unknown Organization'
-    
-    def extract_location(self, container):
-        """Extract location information."""
-        location_selectors = [
-            '.location', '.city', '.country', '.place',
-            '[class*="location"]', '[class*="city"]', '[class*="country"]'
-        ]
-        
-        for selector in location_selectors:
-            element = container.select_one(selector)
-            if element:
-                location = element.get_text(strip=True)
-                if location:
-                    return location
-        
-        # Look for location patterns in text
-        text = container.get_text()
-        location_patterns = [
-            r'Location:\s*([^\n]+)',
-            r'City:\s*([^\n]+)',
-            r'Country:\s*([^\n]+)',
-            r'in\s+([A-Z][a-z]+(?:,\s*[A-Z][a-z]+)*)',
-        ]
-        
-        for pattern in location_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                return match.group(1).strip()
-        
-        return 'Unknown Location'
-    
-    def extract_deadline(self, container):
-        """Extract application deadline."""
-        text = container.get_text()
-        deadline_patterns = [
-            r'Deadline:\s*([^\n]+)',
-            r'Apply by:\s*([^\n]+)',
-            r'Application deadline:\s*([^\n]+)',
-            r'Due:\s*([^\n]+)',
-        ]
-        
-        for pattern in deadline_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                return self.extract_date_from_text(match.group(1), [])
-        
-        return ''
-    
-    def extract_start_date(self, container):
-        """Extract start date."""
-        text = container.get_text()
-        start_patterns = [
-            r'Start date:\s*([^\n]+)',
-            r'Starting:\s*([^\n]+)',
-            r'Begins:\s*([^\n]+)',
-            r'From:\s*([^\n]+)',
-        ]
-        
-        for pattern in start_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                return self.extract_date_from_text(match.group(1), [])
-        
-        return ''
-    
-    def extract_duration(self, container):
-        """Extract duration information."""
-        text = container.get_text()
-        duration_patterns = [
-            r'Duration:\s*([^\n]+)',
-            r'Length:\s*([^\n]+)',
-            r'Period:\s*([^\n]+)',
-            r'(\d+)\s*months?',
-            r'(\d+)\s*weeks?',
-        ]
-        
-        for pattern in duration_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                return match.group(1).strip() if 'Duration:' in pattern else match.group(0)
-        
-        return ''
-    
-    def extract_description(self, container):
-        """Extract description snippet."""
-        # Remove title and other structured elements to get description
-        container_copy = container.__copy__()
-        
-        # Remove common non-description elements
-        for tag in container_copy.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
-            tag.decompose()
-        
-        text = container_copy.get_text(strip=True)
-        
-        # Take first reasonable chunk of text
-        sentences = text.split('.')
-        description = ''
-        
-        for sentence in sentences:
-            if len(sentence.strip()) > 20:  # Substantial sentence
-                description = sentence.strip()
-                break
-        
-        return description
-    
-    def extract_link(self, container):
-        """Extract link to full traineeship details."""
-        # Look for links within the container
-        link_element = container.find('a', href=True)
-        
-        if link_element:
-            href = link_element['href']
+    def extract_title(self, container) -> str:
+        """Extract traineeship title from the specific structure."""
+        try:
+            # Look for the title in the h3 with class "dot-title"
+            title_element = container.select_one('h3.dot-title a')
+            if title_element:
+                return title_element.get_text(strip=True)
             
-            # Make absolute URL
-            if href.startswith('/'):
-                return f"https://erasmusintern.org{href}"
-            elif href.startswith('http'):
-                return href
-            else:
-                return f"https://erasmusintern.org/{href}"
-        
-        return ''
+            # Fallback: look for any h3 with a link
+            h3_link = container.select_one('h3 a')
+            if h3_link:
+                return h3_link.get_text(strip=True)
+                
+            # Final fallback: first link that looks like a title
+            first_link = container.find('a', href=True)
+            if first_link and len(first_link.get_text(strip=True)) > 10:
+                return first_link.get_text(strip=True)
+                
+        except Exception as e:
+            logger.debug(f"Error extracting title: {e}")
+            
+        return "Unknown Title"
+    
+    def extract_field(self, container) -> str:
+        """Extract field of study from ds-top-content h5."""
+        try:
+            # Look for field in the ds-top-content section
+            field_element = container.select_one('.ds-top-content h5')
+            if field_element:
+                return field_element.get_text(strip=True)
+        except Exception as e:
+            logger.debug(f"Error extracting field: {e}")
+            
+        return "Unknown Field"
+    
+    def extract_company(self, container) -> str:
+        """Extract company/recruiter name."""
+        try:
+            # Look for recruiter name in the specific field
+            company_element = container.select_one('.field-name-recruiter-name a')
+            if company_element:
+                return company_element.get_text(strip=True)
+                
+            # Fallback: look for any element with recruiter in class name
+            recruiter_div = container.find('div', class_=lambda x: x and 'recruiter' in x.lower())
+            if recruiter_div:
+                link = recruiter_div.find('a')
+                if link:
+                    return link.get_text(strip=True)
+                    
+        except Exception as e:
+            logger.debug(f"Error extracting company: {e}")
+            
+        return "Unknown Company"
+    
+    def extract_location(self, container) -> str:
+        """Extract location information (country and city)."""
+        try:
+            locations = []
+            
+            # Look for location information in the specific field structure
+            location_containers = container.select('.field-name-field-traineeship-full-location .field-item')
+            
+            for loc_container in location_containers:
+                country_elem = loc_container.select_one('.country')
+                city_elem = loc_container.select_one('.field-name-field-traineeship-location-city')
+                
+                country = country_elem.get_text(strip=True) if country_elem else ""
+                city = city_elem.get_text(strip=True) if city_elem else ""
+                
+                if country and city:
+                    locations.append(f"{city}, {country}")
+                elif country:
+                    locations.append(country)
+                elif city:
+                    locations.append(city)
+            
+            if locations:
+                return "; ".join(locations[:3])  # Limit to 3 locations
+                
+        except Exception as e:
+            logger.debug(f"Error extracting location: {e}")
+            
+        return "Unknown Location"
+    
+    def extract_duration(self, container) -> str:
+        """Extract duration from the specific field."""
+        try:
+            # Look for duration in the labeled field
+            duration_element = container.select_one('.field-name-field-traineeship-duration .field-item')
+            if duration_element:
+                return duration_element.get_text(strip=True)
+                
+        except Exception as e:
+            logger.debug(f"Error extracting duration: {e}")
+            
+        return ""
+    
+    def extract_post_date(self, container) -> str:
+        """Extract post date from the specific field."""
+        try:
+            # Look for post date in the labeled field
+            post_date_element = container.select_one('.field-name-post-date .field-item')
+            if post_date_element:
+                return post_date_element.get_text(strip=True)
+                
+        except Exception as e:
+            logger.debug(f"Error extracting post date: {e}")
+            
+        return ""
+    
+    def extract_deadline(self, container) -> str:
+        """Extract deadline from the specific field."""
+        try:
+            # Look for deadline in the labeled field
+            deadline_element = container.select_one('.field-name-field-traineeship-apply-deadline .field-item')
+            if deadline_element:
+                return deadline_element.get_text(strip=True)
+                
+        except Exception as e:
+            logger.debug(f"Error extracting deadline: {e}")
+            
+        return ""
+    
+    def extract_link(self, container) -> str:
+        """Extract link to the full traineeship details."""
+        try:
+            # Look for the main title link
+            link_element = container.select_one('h3.dot-title a')
+            if link_element and link_element.get('href'):
+                href = link_element['href']
+                if href.startswith('/'):
+                    return f"https://erasmusintern.org{href}"
+                elif href.startswith('http'):
+                    return href
+                else:
+                    return f"https://erasmusintern.org/{href}"
+                    
+        except Exception as e:
+            logger.debug(f"Error extracting link: {e}")
+            
+        return ""
+    
+    def extract_description(self, container) -> str:
+        """Extract description snippet."""
+        try:
+            # Look for description in the body field
+            desc_element = container.select_one('.field-name-body .field-item')
+            if desc_element:
+                # Get text and clean it up
+                desc_text = desc_element.get_text(strip=True)
+                # Remove any HTML tags that might have been missed
+                desc_text = re.sub(r'<[^>]+>', '', desc_text)
+                return desc_text
+                
+        except Exception as e:
+            logger.debug(f"Error extracting description: {e}")
+            
+        return ""
     
     def load_previous_data(self) -> List[Dict]:
         """Load previously stored traineeship data from CSV."""
@@ -441,24 +384,21 @@ class ErasmusInternMonitor:
             return
             
         try:
-            # Define CSV headers
+            # Define CSV headers with the focused fields
             fieldnames = [
-                'id', 'title', 'company', 'location', 'deadline', 'start_date',
-                'duration', 'description', 'link', 'date_identified'
+                'id', 'title', 'field', 'company', 'location', 'duration',
+                'post_date', 'deadline', 'description', 'link', 'date_identified'
             ]
             
-            # Check if file exists to determine if we need to write headers
             file_exists = os.path.exists(DATA_FILE)
             
             with open(DATA_FILE, 'a', encoding='utf-8', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 
-                # Write header only if file is new
                 if not file_exists:
                     writer.writeheader()
                     logger.info("Created new ErasmusIntern CSV file with headers")
                 
-                # Write new traineeships
                 for traineeship in traineeships:
                     writer.writerow(traineeship)
                 
@@ -498,26 +438,24 @@ class ErasmusInternMonitor:
             return
             
         try:
-            # Create message text
+            # Create message text with focused fields
             message = f"🇪🇺 *{len(new_traineeships)} New ErasmusIntern Traineeship(s) Found!*\n\n"
             message += f"Found on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
             
             for i, traineeship in enumerate(new_traineeships, 1):
-                # Clean up text to avoid issues
                 title = str(traineeship.get('title', 'No title')).strip()
+                field = str(traineeship.get('field', 'Unknown field')).strip()
                 company = str(traineeship.get('company', 'Unknown company')).strip()
                 location = str(traineeship.get('location', 'Unknown location')).strip()
-                deadline = str(traineeship.get('deadline', '')).strip()
-                start_date = str(traineeship.get('start_date', '')).strip()
                 duration = str(traineeship.get('duration', '')).strip()
+                deadline = str(traineeship.get('deadline', '')).strip()
                 link = str(traineeship.get('link', '')).strip()
                 
                 message += f"*{i}. {title}*\n"
+                message += f"📚 Field: {field}\n"
                 message += f"🏢 Company: {company}\n"
                 message += f"📍 Location: {location}\n"
                 
-                if start_date:
-                    message += f"📅 Start: {start_date}\n"
                 if duration:
                     message += f"⏱️ Duration: {duration}\n"
                 if deadline:
@@ -551,10 +489,10 @@ class ErasmusInternMonitor:
             
         except Exception as e:
             logger.error(f"Error sending ErasmusIntern Telegram message: {e}")
-            # If message is too long, try sending a shorter version
+            # Try sending a shorter version if message is too long
             if "message is too long" in str(e).lower():
                 try:
-                    short_message = f"🇪🇺 *{len(new_traineeships)} New ErasmusIntern Traineeships Found!*\n\n"
+                    short_message = f"🇪🇺 *{len(new_traineeships)} New ErasmusIntern Traineeships!*\n\n"
                     for traineeship in new_traineeships[:3]:
                         title = str(traineeship.get('title', 'No title')).strip()
                         company = str(traineeship.get('company', 'Unknown')).strip()
@@ -586,7 +524,7 @@ class ErasmusInternMonitor:
             logger.warning("No ErasmusIntern traineeships found - check if page structure has changed")
             return False
         
-        # Find new traineeships (those not in CSV)
+        # Find new traineeships
         new_traineeships = self.find_new_traineeships(current_traineeships)
         
         if new_traineeships:
@@ -605,7 +543,7 @@ class ErasmusInternMonitor:
 
 def main():
     """Main function for GitHub Actions."""
-    logger.info("Starting ErasmusIntern traineeship monitor...")
+    logger.info("Starting ErasmusIntern traineeship monitor (GitHub Actions version)...")
     
     # Validate Telegram configuration
     required_config = ['bot_token', 'chat_id']
@@ -615,6 +553,7 @@ def main():
         sys.exit(1)
     
     logger.info(f"Monitoring ErasmusIntern URL: {TRAINEESHIP_URL}")
+    logger.info(f"Telegram alerts will be sent to chat ID: {TELEGRAM_CONFIG['chat_id']}")
     
     # Create monitor and run check
     monitor = ErasmusInternMonitor()
