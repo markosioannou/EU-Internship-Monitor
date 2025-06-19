@@ -1,13 +1,18 @@
-# .github/workflows/eurodyssey-monitor.yml
-name: EurOdyssey Traineeship Monitor
+# .github/workflows/traineeship-monitor.yml
+name: Multi-Site Traineeship Monitor
 
 on:
   schedule:
-    # Run every 8 hours (GitHub Actions uses UTC time)
+    # Run every 2 hours (GitHub Actions uses UTC time)
     - cron: '0 */8 * * *'
   
   # Allow manual triggering
   workflow_dispatch:
+
+# Grant write permissions to the workflow
+permissions:
+  contents: write
+  actions: read
 
 jobs:
   monitor:
@@ -16,7 +21,10 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      
+      with:
+        # Use the GitHub token for authentication
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
@@ -27,19 +35,65 @@ jobs:
         python -m pip install --upgrade pip
         pip install requests beautifulsoup4 schedule lxml
         
-    - name: Run traineeship monitor
+    - name: Run EurOdyssey monitor
       env:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
+        echo "🔍 Starting EurOdyssey monitor..."
         python eurodyssey_monitor_github.py
+        echo "✅ EurOdyssey monitor completed"
+        
+    - name: Run ErasmusIntern monitor
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        echo "🔍 Starting ErasmusIntern monitor..."
+        python erasmusintern_monitor_github.py
+        echo "✅ ErasmusIntern monitor completed"
         
     - name: Commit and push CSV updates
+      if: success()
       run: |
+        # Configure git
         git config --local user.email "action@github.com"
-        git config --local user.name "GitHub Action"
-        git add eurodyssey_traineeships.csv
-        git diff --staged --quiet || git commit -m "Update traineeships data - $(date)"
-        git push
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        git config --local user.name "Traineeship Monitor Bot"
+        
+        # Track changes
+        changes_made=false
+        
+        # Check and add EurOdyssey CSV
+        if [ -f "eurodyssey_traineeships.csv" ]; then
+          git add eurodyssey_traineeships.csv
+          if ! git diff --staged --quiet eurodyssey_traineeships.csv 2>/dev/null; then
+            echo "📊 EurOdyssey CSV has changes"
+            changes_made=true
+          fi
+        fi
+        
+        # Check and add ErasmusIntern CSV
+        if [ -f "erasmusintern_traineeships.csv" ]; then
+          git add erasmusintern_traineeships.csv
+          if ! git diff --staged --quiet erasmusintern_traineeships.csv 2>/dev/null; then
+            echo "📊 ErasmusIntern CSV has changes"
+            changes_made=true
+          fi
+        fi
+        
+        # Commit if there are any changes
+        if [ "$changes_made" = true ]; then
+          # Check what files are actually staged
+          staged_files=$(git diff --staged --name-only)
+          
+          if [ -n "$staged_files" ]; then
+            echo "Committing changes to: $staged_files"
+            git commit -m "📊 Update traineeship data - $(date '+%Y-%m-%d %H:%M:%S UTC')"
+            git push
+            echo "✅ Successfully pushed traineeship data updates"
+          else
+            echo "ℹ️ No files staged for commit"
+          fi
+        else
+          echo "ℹ️ No changes detected in CSV files"
+        fi
